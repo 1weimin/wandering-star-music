@@ -1,56 +1,50 @@
+# 二开推荐阅读[如何提高项目构建效率](https://developers.weixin.qq.com/miniprogram/dev/wxcloudrun/src/scene/build/speed.html)
+# 选择构建用基础镜像。如需更换，请到[dockerhub官方仓库](https://hub.docker.com/_/java?tab=tags)自行选择后替换。
+FROM maven:3.6.0-jdk-8-slim as build
 
-# 使用 secret-source 镜像作为 secret-build 阶段
-FROM secret-source as secret-build
-# 将 application-production.properties 文件复制到 /app/config/ 目录下
-
-COPY application-production.properties /app/config/
-
-# Build stage
-# 使用 maven:3.9.6-jdk-17-slim 镜像作为 build 阶段
-FROM maven:3.9.6-jdk-17-slim as build
-
-# 设置工作目录为 /app
+# 指定构建过程中的工作目录
 WORKDIR /app
 
-# 复制 src 目录下的文件到 /app/src 目录
+# 将src目录下所有文件，拷贝到工作目录中src目录下（.gitignore/.dockerignore中文件除外）
 COPY src /app/src
-# 复制 settings.xml 和 pom.xml 文件到 /app/ 目录
+
+# 将pom.xml文件，拷贝到工作目录下
 COPY settings.xml pom.xml /app/
 
-# 定义一个名为 DATABASE_NAME 的构建参数，并设置为环境变量
-ARG DATABASE_NAME
-ENV DATABASE_NAME=$DATABASE_NAME
+# 执行代码编译命令
+# 自定义settings.xml, 选用国内镜像源以提高下载速度
+RUN mvn -s /app/settings.xml -f /app/pom.xml clean package
 
-# 创建 /app/config 目录并将 secret-build 阶段中的 application-production.properties 复制到 /app/config/ 目录
-RUN mkdir -p /app/config
-COPY --from=secret-build /app/config/application-production.properties /app/config/
+# 选择运行时基础镜像
+FROM alpine:3.13
 
-# 执行 Maven 构建，如果构建失败则尝试清理并退出
-RUN set -e; \
-    mvn -s settings.xml -f pom.xml clean package || (echo "Maven build failed, attempting to clean up..." && mvn -s settings.xml -f pom.xml clean && exit 1)
+ENV MYSQL_HOST 10.16.102.252
+ENV MYSQL_USER_NAME music
+ENV MYSQL_PASSWORD Music2024@
+ENV DATABASE_NAME wandering-star-music
+# 安装依赖包，如需其他依赖包，请到alpine依赖包管理(https://pkgs.alpinelinux.org/packages?name=php8*imagick*&branch=v3.13)查找。
+# 选用国内镜像源以提高下载速度
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.tencent.com/g' /etc/apk/repositories \
+    && apk add --update --no-cache openjdk8-jre-base \
+    && rm -f /var/cache/apk/*
 
-# Runtime image
-# 使用 openjdk:17-jre-slim 镜像作为运行时镜像
-FROM openjdk:17-jre-slim
+# 容器默认时区为UTC，如需使用上海时间请启用以下时区设置命令
+# RUN apk add tzdata && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && echo Asia/Shanghai > /etc/timezone
 
-# 设置时区为 UTC
-ENV TZ=UTC
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+# 使用 HTTPS 协议访问容器云调用证书安装
+RUN apk add ca-certificates
 
-# 安装 curl
-RUN apt-get update && apt-get install -y curl
-
-# 设置工作目录为 /app
+# 指定运行时的工作目录
 WORKDIR /app
 
-# 从 build 阶段复制生成的 wandering-star-music-0.0.1.jar 文件到当前目录
+# 将构建产物jar包拷贝到运行时目录中
 COPY --from=build /app/target/wandering-star-music-0.0.1.jar .
 
-# 暴露容器端口 80
+# 暴露端口
+# 此处端口必须与「服务设置」-「流水线」以及「手动上传代码包」部署时填写的端口一致，否则会部署失败。
 EXPOSE 80
 
-# 定义容器启动命令
-CMD ["java", "-Dspring.profiles.active=production", "-Xms256m", "-Xmx512m", "-jar", "/app/wandering-star-music-0.0.1.jar"]
-
-# 健康检查，每隔 30 秒执行一次，超时时间为 3 秒，重试 3 次，使用 curl 请求 http://localhost/health，如果请求失败则退出容器
-HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD curl --fail http://localhost/health || exit 1
+# 执行启动命令.
+# 写多行独立的CMD命令是错误写法！只有最后一行CMD命令会被执行，之前的都会被忽略，导致业务报错。
+# 请参考[Docker官方文档之CMD命令](https://docs.docker.com/engine/reference/builder/#cmd)
+CMD ["java", "-jar", "/app/wandering-star-music-0.0.1.jar"]
